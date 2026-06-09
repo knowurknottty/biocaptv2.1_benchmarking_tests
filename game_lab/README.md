@@ -37,6 +37,35 @@ Rules (forced captures, multi-jump, promotion) are imported from
 `capt-functional-context-public/src/capt_context/games/checkers.py`;
 override the location with `--rules-path`.
 
+### selfplay_arena.py + memory_bank.py
+
+Self-play (same engine both sides) for chess and checkers with
+**persistent cross-game memory**: every game's positions are appended to
+a hash-chained JSONL memory bank (`results/memory/`), and the tail of
+that bank (capped by `--memory-cap`, default 512 positions) seeds the
+`history` of the next game's requests. The worker replays that history,
+so the sealed binary's internal state genuinely carries across games
+while remaining a deterministic, tamper-evident function of the recorded
+lineage. Banks are append-only, so runs resume by re-running the command.
+
+```bash
+# plumbing validation at scale (mock engine, no worker required)
+python3 selfplay_arena.py --game checkers --mock --games 5000
+python3 selfplay_arena.py --game chess    --mock --games 5000   # needs python-chess
+
+# real 5k runs once the worker is deployed
+python3 selfplay_arena.py --game checkers --games 5000 --product biocapt \
+    --worker-url https://capt-biocapt-wasm.<account>.workers.dev
+python3 selfplay_arena.py --game chess --games 5000 --product biocapt \
+    --worker-url https://capt-biocapt-wasm.<account>.workers.dev
+```
+
+Each run writes `REPORT_SELFPLAY_<GAME>_*.md` with progress windows,
+hash-chain verification, and opening diversity (with a deterministic
+engine, diversity above 1 is direct evidence that carried memory changes
+decisions). Chess rules need python-chess (`pip install chess`; if the
+wheel build fails, extract the sdist's `chess/` package onto the path).
+
 ## Claim boundary
 
 These reports support claims about determinism, state evolution, and
