@@ -305,7 +305,8 @@ def run(args):
         engine = WorkerClient(args.worker_url, args.product, adapter.endpoint)
 
     out_dir = Path(args.out_dir)
-    bank = MemoryBank(out_dir / "memory", args.game, engine.name.replace("@", "_"))
+    bank_label = args.bank_label or engine.name.replace("@", "_")
+    bank = MemoryBank(out_dir / "memory", args.game, bank_label)
     start_index = bank.games_recorded
     print(f"memory bank: {bank.path} ({start_index} games already recorded)")
 
@@ -406,6 +407,8 @@ def main():
                         help="max seed positions carried into each new game")
     parser.add_argument("--no-carry-memory", dest="carry_memory", action="store_false")
     parser.add_argument("--window", type=int, default=250)
+    parser.add_argument("--bank-label", default="",
+                        help="memory bank label override (keeps mock and real lineages apart)")
     parser.add_argument("--rules-path", default=str(DEFAULT_RULES))
     parser.add_argument("--out-dir", default=str(HERE / "results"))
     run(parser.parse_args())

@@ -66,6 +66,26 @@ engine, diversity above 1 is direct evidence that carried memory changes
 decisions). Chess rules need python-chess (`pip install chess`; if the
 wheel build fails, extract the sdist's `chess/` package onto the path).
 
+### run_priming_pipeline.sh (the local 50k → primed worker path)
+
+One command on a machine with the local WASM bundle:
+
+```bash
+./run_priming_pipeline.sh                  # 25000 games per game type vs REAL binaries
+GAMES=500 ./run_priming_pipeline.sh        # smaller run
+MOCK=1 GAMES=10 ./run_priming_pipeline.sh  # pipeline validation, no binaries
+```
+
+It starts `scripts/local-server.mjs` (the worker's exact evaluation code
+over the local sealed binaries, bound to 127.0.0.1), runs chess and
+checkers self-play in parallel, verifies both memory-bank chains, and
+exports primed seeds (`export_primed_seed.py`) into the worker package's
+`primed/primed-seeds.json`. Then `cd <worker> && npm test && npm run
+deploy` ships a worker whose binaries start every game pre-warmed by the
+recorded lineage. Banks are append-only — rerunning resumes on top of
+existing memory. Mock and real lineages use separate bank labels and the
+exporter refuses broken chains and flags mock-sourced seeds.
+
 ## Claim boundary
 
 These reports support claims about determinism, state evolution, and
