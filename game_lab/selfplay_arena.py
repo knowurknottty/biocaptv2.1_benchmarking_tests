@@ -88,6 +88,14 @@ class CheckersAdapter:
     def mover(self, state):
         return state["active"]
 
+    def material_for_mover(self, state, candidate):
+        values = {"r": 1, "R": 2, "b": 1, "B": 2}
+        red_moves = state["active"] == "red"
+        return sum(
+            (1 if (piece.lower() == "r") == red_moves else -1) * values[piece]
+            for row in candidate["board_after"] for piece in row if piece != "."
+        )
+
 
 class ChessAdapter:
     endpoint = "chess"
@@ -131,8 +139,31 @@ class ChessAdapter:
     def mover(self, state):
         return "white" if state["board"].turn else "black"
 
+    def material_for_mover(self, state, candidate):
+        values = {"p": 1, "n": 3, "b": 3, "r": 5, "q": 9, "k": 0}
+        board_field = str(candidate["fen_after"]).split()[0]
+        white_delta = sum(
+            (values[char.lower()] if char.isupper() else -values[char.lower()])
+            for char in board_field if char.isalpha()
+        )
+        return white_delta if state["board"].turn else -white_delta
+
 
 ADAPTERS = {"checkers": CheckersAdapter, "chess": ChessAdapter}
+
+
+class GreedyBaseline:
+    """Fixed opponent for learning probes: max material, deterministic ties."""
+
+    name = "greedy"
+
+    def choose(self, adapter, state, candidates):
+        scored = [
+            (-adapter.material_for_mover(state, candidate), candidate["move"], candidate)
+            for candidate in candidates
+        ]
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return scored[0][2]
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +326,62 @@ def play_one_game(adapter, engine, seed_history, max_plies):
     }
 
 
+def play_probe_game(adapter, engine, seed_history, max_plies, engine_first):
+    """Engine (with current memory) vs fixed greedy baseline. Not banked."""
+    baseline = GreedyBaseline()
+    state = adapter.new_game()
+    first_color = adapter.mover(state)
+    second_color = "black"  # second mover is black in both chess and checkers
+    engine_color = first_color if engine_first else second_color
+    game_positions = [adapter.position(state)]
+    plies = 0
+    for _ in range(max_plies):
+        terminal = adapter.terminal(state)
+        if terminal:
+            return _probe_outcome(terminal, engine_color), plies
+        candidates = adapter.candidates(state)
+        if adapter.mover(state) == engine_color:
+            payload = {
+                "product": engine.product,
+                **adapter.payload_fields(state),
+                "history": seed_history + game_positions[:-1],
+                "candidates": [
+                    {"move": c["move"], adapter.after_key(): c[adapter.after_key()]}
+                    for c in candidates
+                ],
+            }
+            response = engine.request(payload)
+            chosen = next(c for c in candidates if c["move"] == response["selected_move"])
+        else:
+            chosen = baseline.choose(adapter, state, candidates)
+        adapter.apply(state, chosen)
+        game_positions.append(adapter.position(state))
+        plies += 1
+    terminal = adapter.terminal(state)
+    return (_probe_outcome(terminal, engine_color) if terminal else 0.5), plies
+
+
+def _probe_outcome(result, engine_color):
+    if not result.endswith("_wins"):
+        return 0.5
+    return 1.0 if result == f"{engine_color}_wins" else 0.0
+
+
+def run_probe(adapter, engine, bank, args, through_game):
+    seed = bank.seed_history(args.memory_cap) if args.carry_memory else []
+    score = 0.0
+    for index in range(args.probe_games):
+        outcome, _ = play_probe_game(
+            adapter, engine, seed, args.max_plies, engine_first=index % 2 == 0)
+        score += outcome
+    fraction = round(score / max(1, args.probe_games), 3)
+    point = {"through_game": through_game, "probe_games": args.probe_games,
+             "score_vs_greedy": fraction, "memory_positions": len(seed)}
+    print(f"[probe] after {through_game} games: {fraction} vs greedy "
+          f"({args.probe_games} games, memory={len(seed)} positions)")
+    return point
+
+
 def run(args):
     adapter = ADAPTERS[args.game](Path(args.rules_path))
     if args.mock:
@@ -314,7 +401,11 @@ def run(args):
     window_stats = Counter()
     window_plies = []
     first_moves = Counter()
+    learning_curve = []
     started = time.time()
+
+    if args.probe_every:
+        learning_curve.append(run_probe(adapter, engine, bank, args, start_index))
 
     for game_number in range(args.games):
         seed = bank.seed_history(args.memory_cap) if args.carry_memory else []
@@ -341,16 +432,21 @@ def run(args):
                   f"avg_plies={windows[-1]['avg_plies']}")
             window_stats = Counter()
             window_plies = []
+        if args.probe_every and (game_number + 1) % args.probe_every == 0:
+            learning_curve.append(
+                run_probe(adapter, engine, bank, args, start_index + game_number + 1))
 
     chain = bank.verify_chain()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report_path = out_dir / f"REPORT_SELFPLAY_{args.game.upper()}_{stamp}.md"
-    write_report(report_path, args, engine, bank, windows, first_moves, chain, start_index)
+    write_report(report_path, args, engine, bank, windows, first_moves, chain,
+                 start_index, learning_curve)
     print(f"chain verification: {chain}")
     print(f"wrote {report_path}")
 
 
-def write_report(path, args, engine, bank, windows, first_moves, chain, start_index):
+def write_report(path, args, engine, bank, windows, first_moves, chain, start_index,
+                 learning_curve=()):
     diversity = len(first_moves)
     total = sum(first_moves.values())
     lines = [
@@ -371,6 +467,26 @@ def write_report(path, args, engine, bank, windows, first_moves, chain, start_in
     for window in windows:
         lines.append(f"| {window['through_game']} | {window['results']} "
                      f"| {window['avg_plies']} | {window['games_per_sec']} |")
+    if learning_curve:
+        lines += [
+            "",
+            "## Learning curve (probe matches vs fixed greedy baseline)",
+            "",
+            "| After games | Score vs greedy | Probe games | Memory positions |",
+            "|---|---|---|---|",
+        ]
+        for point in learning_curve:
+            lines.append(f"| {point['through_game']} | {point['score_vs_greedy']} "
+                         f"| {point['probe_games']} | {point['memory_positions']} |")
+        first_score = learning_curve[0]["score_vs_greedy"]
+        last_score = learning_curve[-1]["score_vs_greedy"]
+        lines += [
+            "",
+            f"Probe matches use the current memory bank but are NOT recorded into it. "
+            f"Score moved {first_score} -> {last_score} over the run. A flat curve means "
+            f"accumulated memory does not improve play against this baseline; only a "
+            f"sustained rise supports a learning claim.",
+        ]
     lines += [
         "",
         "## Memory evidence",
@@ -409,6 +525,10 @@ def main():
     parser.add_argument("--window", type=int, default=250)
     parser.add_argument("--bank-label", default="",
                         help="memory bank label override (keeps mock and real lineages apart)")
+    parser.add_argument("--probe-every", type=int, default=1000,
+                        help="run probe matches vs fixed greedy baseline every N games "
+                             "(0 disables); measures whether memory improves play")
+    parser.add_argument("--probe-games", type=int, default=50)
     parser.add_argument("--rules-path", default=str(DEFAULT_RULES))
     parser.add_argument("--out-dir", default=str(HERE / "results"))
     run(parser.parse_args())
