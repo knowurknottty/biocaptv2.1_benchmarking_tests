@@ -435,12 +435,24 @@ def run(args):
         if args.probe_every and (game_number + 1) % args.probe_every == 0:
             learning_curve.append(
                 run_probe(adapter, engine, bank, args, start_index + game_number + 1))
+            # Checkpoint: persist an in-progress report at every probe so an
+            # interrupted run still yields the curves up to the last probe.
+            # Banks already persist and resume; this just keeps the human-
+            # readable report from being all-or-nothing.
+            ckpt_path = out_dir / f"REPORT_SELFPLAY_{args.game.upper()}_INPROGRESS.md"
+            write_report(ckpt_path, args, engine, bank, windows, first_moves,
+                         bank.verify_chain(), start_index, learning_curve)
+            print(f"[checkpoint] wrote {ckpt_path} "
+                  f"(through game {start_index + game_number + 1})")
 
     chain = bank.verify_chain()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report_path = out_dir / f"REPORT_SELFPLAY_{args.game.upper()}_{stamp}.md"
     write_report(report_path, args, engine, bank, windows, first_moves, chain,
                  start_index, learning_curve)
+    # final report supersedes the checkpoint; drop the in-progress file
+    ckpt_path = out_dir / f"REPORT_SELFPLAY_{args.game.upper()}_INPROGRESS.md"
+    ckpt_path.unlink(missing_ok=True)
     print(f"chain verification: {chain}")
     print(f"wrote {report_path}")
 
