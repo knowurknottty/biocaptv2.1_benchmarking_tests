@@ -31,7 +31,7 @@ else
   npm run prepare:wasm
 fi
 
-LOCAL_WASM_PORT="$PORT" node scripts/local-server.mjs "${SERVER_ARGS[@]}" &
+LOCAL_WASM_PORT="$PORT" node scripts/local-server.mjs "${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}" &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
